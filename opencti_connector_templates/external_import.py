@@ -1,7 +1,10 @@
 import os
 import sys
 import time
-from datetime import datetime
+import urllib3
+
+# from datetime import datetime, timedelta
+import datetime
 
 import stix2
 from pycti import OpenCTIConnectorHelper
@@ -16,169 +19,132 @@ class ExternalImportConnector:
 
     Attributes:
         helper (OpenCTIConnectorHelper): The helper to use.
-        interval (str): The interval to use. It SHOULD be a string in the format '7d', '12h', '10m', '30s' where the final letter SHOULD be one of 'd', 'h', 'm', 's' standing for day, hour, minute, second respectively.
+        interval (timedelta): The interval to use.
         update_existing_data (str): Whether to update existing data or not in OpenCTI.
     """
 
     def __init__(self):
-        self.helper = OpenCTIConnectorHelper({})
 
-        # Specific connector attributes for external import connectors
-        try:
-            self.interval = os.environ.get("CONNECTOR_RUN_EVERY", None).lower()
-            self.helper.log_info(
-                f"Verifying integrity of the CONNECTOR_RUN_EVERY value: '{self.interval}'"
-            )
-            unit = self.interval[-1]
-            if unit not in ["d", "h", "m", "s"]:
-                raise TypeError
-            int(self.interval[:-1])
-        except TypeError as _:
-            msg = f"Error ({_}) when grabbing CONNECTOR_RUN_EVERY environment variable: '{self.interval}'. It SHOULD be a string in the format '7d', '12h', '10m', '30s' where the final letter SHOULD be one of 'd', 'h', 'm', 's' standing for day, hour, minute, second respectively. "
-            self.helper.log_error(msg)
-            raise ValueError(msg)
+        # The direct access (os.environ[x]) are mandatory,
+        # the os.environ.get()s are optional
 
-        update_existing_data = os.environ.get("CONNECTOR_UPDATE_EXISTING_DATA", "false")
-        if isinstance(update_existing_data, str) and update_existing_data.lower() in [
-            "true",
-            "false",
-        ]:
-            self.update_existing_data = (
-                True if update_existing_data.lower() == "true" else False
-            )
-        elif isinstance(update_existing_data, bool) and update_existing_data.lower in [
-            True,
-            False,
-        ]:
-            self.update_existing_data = update_existing_data
+        if os.environ.get("OPENCTI_SSL_VERIFY", "yes").lower() in ("yes", "true"):
+            verify = True
         else:
-            msg = f"Error when grabbing CONNECTOR_UPDATE_EXISTING_DATA environment variable: '{update_existing_data}'. It SHOULD be either `true` or `false`. `false` is assumed. "
-            self.helper.log_warning(msg)
-            self.update_existing_data = "false"
+            verify = False
+            urllib3.disable_warnings()
+
+        if os.environ.get("CONNECTOR_UPDATE_EXISTING_DATA", "yes").lower() in (
+            "yes",
+            "true",
+        ):
+            self.update_existing_data = True
+        else:
+            self.update_existing_data = False
+
+        # Initialize the helper class.
+        self.helper = OpenCTIConnectorHelper(
+            config={
+                "OPENCTI_URL": os.environ["OPENCTI_URL"],
+                "OPENCTI_TOKEN": os.environ["OPENCTI_TOKEN"],
+                "OPENCTI_SSL_VERIFY": verify,
+                "CONNECTOR_ID": os.environ["CONNECTOR_ID"],
+                "CONNECTOR_TYPE": "EXTERNAL_IMPORT",
+                "CONNECTOR_NAME": os.environ["CONNECTOR_NAME"],
+                "CONNECTOR_SCOPE": "stix2",
+                "CONNECTOR_LOG_LEVEL": os.environ.get("CONNECTOR_LOG_LEVEL", "warning"),
+                "CONNECTOR_UPDATE_EXISTING_DATA": self.update_existing_data,
+            }
+        )
+        if not verify:
+            self.helper.log_warning(
+                "Certificate validation has been disabled, this is not secure."
+            )
+
+        # Figure out the interval
+        try:
+            interval = os.environ["CONNECTOR_RUN_EVERY"]
+            timesuffixes = {"d": 60 * 60 * 24, "h": 60 * 60, "m": 60, "s": 1}
+            interval = int(interval[:-1]) * timesuffixes[interval[-1].lower()]
+            self.interval = datetime.timedelta(seconds=interval)
+        except (TypeError, ValueError):
+            self.helper.log_error(
+                f"Invalid CONNECTOR_RUN_EVERY value, it should be a string like '7d', '2h', '2m' using one of the following suffixes: {', '.join(timesuffixes.keys())}"
+            )
+            sys.exit(1)
+
+    def _get_env(self, var: str, default: str = "") -> str:
+        if val := os.environ.get(var, ""):
+            return val
+
+        if not default:
+            self.helper.log_warning(f"Missing required environment variable: {var}")
+            sys.exit(1)
+        else:
+            self.helper.log_info(
+                f"Missing optional environment variable: {var}, defaulting to '{default}'"
+            )
+            return default
 
     def _collect_intelligence(self) -> list:
         """Collect intelligence from the source"""
         raise NotImplementedError
 
-    def _get_interval(self) -> int:
-        """Returns the interval to use for the connector
-
-        This SHOULD return always the interval in seconds. If the connector is execting that the parameter is received as hoursUncomment as necessary.
-        """
-        unit = self.interval[-1:]
-        value = self.interval[:-1]
-
-        try:
-            if unit == "d":
-                # In days:
-                return int(value) * 60 * 60 * 24
-            elif unit == "h":
-                # In hours:
-                return int(value) * 60 * 60
-            elif unit == "m":
-                # In minutes:
-                return int(value) * 60
-            elif unit == "s":
-                # In seconds:
-                return int(value)
-        except Exception as e:
-            self.helper.log_error(
-                f"Error when converting CONNECTOR_RUN_EVERY environment variable: '{self.interval}'. {str(e)}"
-            )
-            raise ValueError(
-                f"Error when converting CONNECTOR_RUN_EVERY environment variable: '{self.interval}'. {str(e)}"
-            )
-
     def run(self) -> None:
         # Main procedure
         self.helper.log_info(f"Starting {self.helper.connect_name} connector...")
         while True:
+
+            run_start = datetime.datetime.utcnow()
+            next_run = run_start + self.interval
+
             try:
-                # Get the current timestamp and check
-                timestamp = int(time.time())
-                current_state = self.helper.get_state()
-                if current_state is not None and "last_run" in current_state:
-                    last_run = current_state["last_run"]
-                    self.helper.log_info(
-                        f"{self.helper.connect_name} connector last run: "
-                        + datetime.utcfromtimestamp(last_run).strftime(
-                            "%Y-%m-%d %H:%M:%S"
-                        )
-                    )
-                else:
-                    last_run = None
-                    self.helper.log_info(
-                        f"{self.helper.connect_name} connector has never run"
-                    )
+                self.current_state = self.helper.get_state()
 
-                # If the last_run is more than interval-1 day
-                if last_run is None or ((timestamp - last_run) >= self._get_interval()):
-                    self.helper.log_info(f"{self.helper.connect_name} will run!")
-                    now = datetime.utcfromtimestamp(timestamp)
-                    friendly_name = f"{self.helper.connect_name} run @ " + now.strftime(
-                        "%Y-%m-%d %H:%M:%S"
-                    )
-                    work_id = self.helper.api.work.initiate_work(
-                        self.helper.connect_id, friendly_name
-                    )
+                # Generate a 'work id' to keep track of progress.
+                work_name = f"{self.helper.connect_id} work at {datetime.datetime.utcnow().isoformat()}"
+                work_id = self.helper.api.work.initiate_work(
+                    self.helper.connect_id, work_name
+                )
 
-                    try:
-                        # Performing the collection of intelligence
-                        bundle_objects = self._collect_intelligence()
+                try:
+                    bundle_objects = self._collect_intelligence()
+                    if bundle_objects:
                         bundle = stix2.Bundle(
-                            objects=bundle_objects, allow_custom=True
-                        ).serialize()
-
-                        self.helper.log_info(
-                            f"Sending {len(bundle_objects)} STIX objects to OpenCTI..."
+                            objects=bundle_objects,
+                            allow_custom=True,
                         )
                         self.helper.send_stix2_bundle(
-                            bundle,
+                            bundle.serialize(),
                             update=self.update_existing_data,
                             work_id=work_id,
                         )
-                    except Exception as e:
-                        self.helper.log_error(str(e))
 
-                    # Store the current timestamp as a last run
-                    message = (
-                        f"{self.helper.connect_name} connector successfully run, storing last_run as "
-                        + str(timestamp)
+                except Exception as e:
+                    self.helper.api.work.to_processed(
+                        work_id,
+                        f"Error importing {len(bundle_objects)} STIX2 objects.",
+                        in_error=True,
                     )
-                    self.helper.log_info(message)
 
-                    self.helper.log_debug(
-                        f"Grabbing current state and update it with last_run: {timestamp}"
-                    )
-                    current_state = self.helper.get_state()
-                    if current_state:
-                        current_state["last_run"] = timestamp
-                    else:
-                        current_state = {"last_run": timestamp}
-                    self.helper.set_state(current_state)
-
-                    self.helper.api.work.to_processed(work_id, message)
-                    self.helper.log_info(
-                        "Last_run stored, next run in: "
-                        + str(round(self._get_interval() / 60 / 60, 2))
-                        + " hours"
-                    )
+                # No exception, try-else :-D
                 else:
-                    new_interval = self._get_interval() - (timestamp - last_run)
-                    self.helper.log_info(
-                        f"{self.helper.connect_name} connector will not run, next run in: "
-                        + str(round(new_interval / 60 / 60, 2))
-                        + " hours"
+                    self.helper.api.work.to_processed(
+                        work_id,
+                        f"Succesfully imported {len(bundle_objects)} STIX2 objects.",
                     )
 
-            except (KeyboardInterrupt, SystemExit):
-                self.helper.log_info(f"{self.helper.connect_name} connector stopped")
-                sys.exit(0)
-            except Exception as e:
-                self.helper.log_error(str(e))
+                self.helper.set_state(self.current_state)
 
-            if self.helper.connect_run_and_terminate:
-                self.helper.log_info(f"{self.helper.connect_name} connector ended")
-                sys.exit(0)
+            except KeyboardInterrupt:
+                break
+            except:
+                pass
 
-            time.sleep(60)
+            remaining_time = next_run - datetime.datetime.utcnow()
+            if remaining_time.total_seconds() > 0:
+                time.sleep(remaining_time.seconds)
+            else:
+                self.helper.log_warning(
+                    f"We're overdue at the end of the run, scheduled start was {int(remaining_time.total_seconds())} ago. Skipping sleep. Check the workload or interval to prevent these warnings."
+                )
