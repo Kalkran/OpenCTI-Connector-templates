@@ -7,3 +7,7 @@ name = "opencti_connector_templates"
 authors = [{name = "tedk", email = "tedk@kpn-cert.nl"}]
 readme = "README.md"
 dynamic = ["version", "description"]
+dependencies = [
+    'pycti==5.12.29',
+    'stix2==3.0.1',
+]
