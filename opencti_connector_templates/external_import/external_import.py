@@ -1,3 +1,4 @@
+import logging
 import os
 import sys
 import time
@@ -56,6 +57,7 @@ class ExternalImportConnector:
                 "CONNECTOR_UPDATE_EXISTING_DATA": self.update_existing_data,
             }
         )
+
         if not verify:
             self.helper.log_warning(
                 "Certificate validation has been disabled, this is not secure."
@@ -123,7 +125,7 @@ class ExternalImportConnector:
                 except Exception as e:
                     self.helper.api.work.to_processed(
                         work_id,
-                        f"Error importing {len(bundle_objects)} STIX2 objects.",
+                        f"Error importing STIX2 objects.",
                         in_error=True,
                     )
 
@@ -138,8 +140,8 @@ class ExternalImportConnector:
 
             except KeyboardInterrupt:
                 break
-            except:
-                pass
+            except Exception as e:
+                print(f"Exception in ExternalImportConnector: {e}")
 
             remaining_time = next_run - datetime.datetime.utcnow()
             if remaining_time.total_seconds() > 0:
