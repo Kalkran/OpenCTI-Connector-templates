@@ -125,9 +125,10 @@ class ExternalImportConnector:
                         )
 
                 except Exception as e:
+
                     self.helper.api.work.to_processed(
                         work_id,
-                        f"Error importing STIX2 objects.",
+                        f"Error importing STIX2 objects.\n{e}",
                         in_error=True,
                     )
 
