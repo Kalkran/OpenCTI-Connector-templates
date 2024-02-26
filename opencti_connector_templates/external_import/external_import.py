@@ -102,6 +102,8 @@ class ExternalImportConnector:
 
             try:
                 self.current_state = self.helper.get_state()
+                if type(self.current_state) is not dict:
+                    self.current_state = {}
 
                 # Generate a 'work id' to keep track of progress.
                 work_name = f"{self.helper.connect_id} work at {datetime.datetime.utcnow().isoformat()}"
